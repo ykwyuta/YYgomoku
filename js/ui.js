@@ -680,9 +680,57 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.className = 'toast'; }, 1800);
   }
-  let actx = null;
+  // 音：ブラウザは「画面に さわった とき」しか 音を 出させて くれないので、
+  // さわるたびに 音の しくみを 起こしておく（iPhone の マナーモードでも 鳴るように する）
+  let actx = null, unlocked = false, silentEl = null;
+  function audioCtx() {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      actx = new AC();
+    }
+    return actx;
+  }
+  // 音の出ない みじかい WAV（HTML の audio で 鳴らすと、iPhone で マナーモードでも Web Audio が 鳴るように なる）
+  function silentWav() {
+    const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, 'data'); v.setUint32(40, n * 2, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  }
+  function unlockAudio() {
+    if (!app.settings.sound) return;
+    try {
+      if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback';
+    } catch (e) { /* 対応していない ブラウザ */ }
+    const ctx = audioCtx();
+    if (!ctx) return;
+    if (ctx.state !== 'running') ctx.resume().catch(() => {});
+    if (unlocked) return;
+    unlocked = true;
+    try {
+      // 1サンプルだけの 無音を 鳴らして 音を 出せる 状態に する（古い iPhone 向け）
+      const b = ctx.createBuffer(1, 1, 22050);
+      const s = ctx.createBufferSource();
+      s.buffer = b;
+      s.connect(ctx.destination);
+      s.start(0);
+      if (!navigator.audioSession) {
+        silentEl = new Audio(silentWav());
+        silentEl.setAttribute('playsinline', '');
+        const pr = silentEl.play();
+        if (pr && pr.catch) pr.catch(() => {});
+      }
+    } catch (e) { /* 音が出せない環境では鳴らさない */ }
+  }
+  ['pointerdown', 'touchend', 'click', 'keydown'].forEach(ev =>
+    document.addEventListener(ev, unlockAudio, { capture: true, passive: true }));
+
   function tone(freq, start, dur, type, vol) {
-    const t0 = actx.currentTime + start;
+    const t0 = actx.currentTime + 0.01 + start;
     const o = actx.createOscillator();
     const g = actx.createGain();
     o.type = type || 'triangle';
@@ -696,12 +744,20 @@
   }
   function sound(kind) {
     if (!app.settings.sound) return;
+    const ctx = audioCtx();
+    if (!ctx) return;
+    // まだ 止まっていたら、動きだしてから 鳴らす
+    if (ctx.state !== 'running') {
+      ctx.resume().then(() => { if (ctx.state === 'running') play(kind); }).catch(() => {});
+      return;
+    }
+    play(kind);
+  }
+  function play(kind) {
     try {
-      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-      if (actx.state === 'suspended') actx.resume();
       if (kind === 'move') {
         const o = tone(1200, 0, 0.07, 'triangle', 0.3);
-        o.frequency.exponentialRampToValueAtTime(220, actx.currentTime + 0.06);
+        o.frequency.exponentialRampToValueAtTime(220, actx.currentTime + 0.07);
       } else if (kind === 'four') {
         [700, 900, 1100].forEach((f, i) => tone(f, 0.08 + i * 0.06, 0.12, 'triangle', 0.16));
       } else if (kind === 'check') {
